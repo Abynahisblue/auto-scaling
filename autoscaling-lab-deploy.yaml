@@ -1,0 +1,9 @@
+template-file-path: autoScalingLab.yaml
+parameters:
+  PublicSubnetCIDR: 10.0.1.0/24
+  PrivateSubnetCIDR: 10.0.2.0/24
+  KeyPairName: ''
+  VpcCIDR: 10.0.0.0/16
+  InstanceType: t3.micro
+  LatestAmiId: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64
+tags: {}
