@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: 'Auto Scaling Lab - Apache web server with dynamic scaling based on CPU load'
+Description: 'Auto Scaling Lab - Apache web server with dynamic scaling based on CPU load - Fixed for EU-Central-1'
 
 Conditions:
   HasKeyPair: !Not [!Equals [!Ref KeyPairName, ""]]
@@ -35,8 +35,14 @@ Parameters:
     Type: String
     Default: ""
     ConstraintDescription: Must be the name of an existing EC2 KeyPair or empty
+  LatestAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64
+    Description: Latest Amazon Linux 2023 AMI ID
+
 
 Resources:
+
   # VPC Configuration
   VPC:
     Type: AWS::EC2::VPC
@@ -253,7 +259,7 @@ Resources:
       Protocol: HTTP
       VpcId: !Ref VPC
       HealthCheckIntervalSeconds: 30
-      HealthCheckPath: /health
+      HealthCheckPath: /health.html
       HealthCheckProtocol: HTTP
       HealthCheckTimeoutSeconds: 10
       HealthyThresholdCount: 2
@@ -282,7 +288,7 @@ Resources:
     Properties:
       LaunchTemplateName: AutoScaling-LaunchTemplate
       LaunchTemplateData:
-        ImageId: ami-0084a47cc718c111a  # Amazon Linux 2023 AMI for EU-Central-1 (Frankfurt)
+        ImageId: !Ref LatestAmiId
         InstanceType: !Ref InstanceType
         KeyName: !If [HasKeyPair, !Ref KeyPairName, !Ref "AWS::NoValue"]
         SecurityGroupIds:
@@ -296,22 +302,44 @@ Resources:
             exec > >(tee /var/log/user-data.log|logger -t user-data -s 2>/dev/console) 2>&1
             echo "Starting user data script at $(date)"
             
-            # Update system
-            yum update -y
+            # Function to signal failure and exit
+            signal_failure() {
+                echo "ERROR: $1"
+                # Install aws-cfn-bootstrap if not present for signaling
+                if ! command -v cfn-signal &> /dev/null; then
+                    echo "Installing aws-cfn-bootstrap for signaling..."
+                    dnf install -y aws-cfn-bootstrap || yum install -y aws-cfn-bootstrap
+                fi
+                /opt/aws/bin/cfn-signal -e 1 --stack ${AWS::StackName} --resource AutoScalingGroup --region ${AWS::Region}
+                exit 1
+            }
+            
+            # Update system - try dnf first (AL2023), fallback to yum (AL2)
+            echo "Updating system packages..."
+            if command -v dnf &> /dev/null; then
+                dnf update -y || signal_failure "Failed to update system packages with dnf"
+                PACKAGE_MANAGER="dnf"
+            else
+                yum update -y || signal_failure "Failed to update system packages with yum"
+                PACKAGE_MANAGER="yum"
+            fi
+            
+            # Install CloudFormation bootstrap tools first
+            echo "Installing CloudFormation bootstrap tools..."
+            $PACKAGE_MANAGER install -y aws-cfn-bootstrap || signal_failure "Failed to install aws-cfn-bootstrap"
             
             # Install packages
-            echo "Installing packages..."
-            yum install -y httpd php stress
+            echo "Installing required packages..."
+            $PACKAGE_MANAGER install -y httpd php stress || signal_failure "Failed to install required packages"
             
             # Start and enable httpd
             echo "Starting Apache..."
-            systemctl start httpd
-            systemctl enable httpd
+            systemctl start httpd || signal_failure "Failed to start Apache"
+            systemctl enable httpd || signal_failure "Failed to enable Apache"
             
             # Verify httpd is running
             if ! systemctl is-active --quiet httpd; then
-                echo "ERROR: Apache failed to start"
-                exit 1
+                signal_failure "Apache is not running after start"
             fi
             
             # Get instance metadata
@@ -319,10 +347,14 @@ Resources:
             INSTANCE_ID=$(curl -s http://169.254.169.254/latest/meta-data/instance-id)
             LOCAL_IP=$(curl -s http://169.254.169.254/latest/meta-data/local-ipv4)
             
-            # Create health check endpoint
+            # Create health check endpoint as proper HTML
             echo "Creating health check endpoint..."
-            cat > /var/www/html/health << 'EOF'
-            OK
+            cat > /var/www/html/health.html << 'EOF'
+            <!DOCTYPE html>
+            <html>
+            <head><title>Health Check</title></head>
+            <body><h1>OK</h1></body>
+            </html>
             EOF
             
             # Create the main web page
@@ -333,7 +365,7 @@ Resources:
             <head>
                 <meta charset="UTF-8">
                 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-                <title>Auto Scaling Demo</title>
+                <title>Auto Scaling Demo - Frankfurt</title>
                 <style>
                     body {
                         font-family: Arial, sans-serif;
@@ -408,12 +440,13 @@ Resources:
             </head>
             <body>
                 <div class="container">
-                    <h1>🚀 Auto Scaling Demo</h1>
+                    <h1>🚀 Auto Scaling Demo - Frankfurt</h1>
             
                     <div class="info-box">
                         <h3>Instance Information:</h3>
                         <p><strong>Instance ID:</strong> INSTANCE_ID_PLACEHOLDER</p>
                         <p><strong>Private IP:</strong> LOCAL_IP_PLACEHOLDER</p>
+                        <p><strong>Region:</strong> eu-central-1 (Frankfurt)</p>
                         <p><strong>Timestamp:</strong> <span id="timestamp"></span></p>
                     </div>
             
@@ -453,7 +486,7 @@ Resources:
                         spinner.style.display = 'block';
                         status.textContent = 'CPU stress test running for 5 minutes. Monitor CloudWatch for scaling events!';
             
-                        fetch('/stress', {
+                        fetch('/stress.php', {
                             method: 'POST',
                             headers: {
                                 'Content-Type': 'application/json',
@@ -502,28 +535,6 @@ Resources:
             ?>
             EOF
             
-            # Configure Apache for PHP and URL rewriting
-            echo "Configuring Apache..."
-            
-            # Enable mod_rewrite
-            echo "LoadModule rewrite_module modules/mod_rewrite.so" >> /etc/httpd/conf/httpd.conf
-            
-            # Create .htaccess for URL rewriting
-            cat > /var/www/html/.htaccess << 'EOF'
-            RewriteEngine On
-            RewriteRule ^stress$ stress.php [L]
-            EOF
-            
-            # Update main Apache configuration
-            cat >> /etc/httpd/conf/httpd.conf << 'EOF'
-            
-            # Allow .htaccess overrides
-            <Directory "/var/www/html">
-                AllowOverride All
-                Require all granted
-            </Directory>
-            EOF
-            
             # Set proper permissions
             chown -R apache:apache /var/www/html
             chmod -R 644 /var/www/html
@@ -531,27 +542,24 @@ Resources:
             
             # Restart Apache to apply all changes
             echo "Restarting Apache..."
-            systemctl restart httpd
+            systemctl restart httpd || signal_failure "Failed to restart Apache"
             
             # Verify Apache is still running after restart
             sleep 5
             if ! systemctl is-active --quiet httpd; then
-                echo "ERROR: Apache failed after restart"
-                systemctl status httpd
-                exit 1
+                signal_failure "Apache failed after restart"
             fi
             
             # Test health endpoint
             echo "Testing health endpoint..."
-            if ! curl -f http://localhost/health > /dev/null 2>&1; then
-                echo "ERROR: Health check endpoint not responding"
-                exit 1
+            if ! curl -f http://localhost/health.html > /dev/null 2>&1; then
+                signal_failure "Health check endpoint not responding"
             fi
             
-            # Signal CloudFormation that the instance is ready
-            /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource AutoScalingGroup --region ${AWS::Region}
-            
             echo "User data script completed successfully at $(date)"
+            
+            # Signal CloudFormation success
+            /opt/aws/bin/cfn-signal -e 0 --stack ${AWS::StackName} --resource AutoScalingGroup --region ${AWS::Region}
 
         TagSpecifications:
           - ResourceType: instance
@@ -599,8 +607,7 @@ Resources:
       TargetGroupARNs:
         - !Ref TargetGroup
       HealthCheckType: ELB
-      HealthCheckGracePeriod: 600  # Increased to 10 minutes to allow for full startup
-      DefaultCooldown: 300
+      HealthCheckGracePeriod: 300
       Tags:
         - Key: Name
           Value: AutoScaling-Instance
@@ -681,7 +688,7 @@ Outputs:
 
   HealthCheckURL:
     Description: Health check endpoint URL
-    Value: !Sub 'http://${ApplicationLoadBalancer.DNSName}/health'
+    Value: !Sub 'http://${ApplicationLoadBalancer.DNSName}/health.html'
     Export:
       Name: !Sub '${AWS::StackName}-HealthCheckURL'
 
