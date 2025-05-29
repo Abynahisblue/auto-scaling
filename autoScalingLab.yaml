@@ -342,10 +342,36 @@ Resources:
                 signal_failure "Apache is not running after start"
             fi
             
-            # Get instance metadata
+            # Get instance metadata with retries
             echo "Getting instance metadata..."
-            INSTANCE_ID=$(curl -s http://169.254.169.254/latest/meta-data/instance-id)
-            LOCAL_IP=$(curl -s http://169.254.169.254/latest/meta-data/local-ipv4)
+            INSTANCE_ID=""
+            LOCAL_IP=""
+            
+            # Retry logic for metadata
+            for i in {1..10}; do
+                echo "Attempt $i to get instance metadata..."
+                INSTANCE_ID=$(curl -s --connect-timeout 5 --max-time 10 http://169.254.169.254/latest/meta-data/instance-id)
+                LOCAL_IP=$(curl -s --connect-timeout 5 --max-time 10 http://169.254.169.254/latest/meta-data/local-ipv4)
+            
+                if [[ -n "$INSTANCE_ID" && -n "$LOCAL_IP" ]]; then
+                    echo "Successfully retrieved metadata: Instance ID: $INSTANCE_ID, Local IP: $LOCAL_IP"
+                    break
+                else
+                    echo "Failed to get metadata on attempt $i, retrying in 5 seconds..."
+                    sleep 5
+                fi
+            done
+            
+            # Fallback if metadata still not available
+            if [[ -z "$INSTANCE_ID" ]]; then
+                INSTANCE_ID="metadata-unavailable"
+                echo "Warning: Could not retrieve instance ID from metadata service"
+            fi
+            
+            if [[ -z "$LOCAL_IP" ]]; then
+                LOCAL_IP="metadata-unavailable"
+                echo "Warning: Could not retrieve local IP from metadata service"
+            fi
             
             # Create health check endpoint as proper HTML
             echo "Creating health check endpoint..."
@@ -357,9 +383,9 @@ Resources:
             </html>
             EOF
             
-            # Create the main web page
+            # Create the main web page with dynamic content
             echo "Creating main web page..."
-            cat > /var/www/html/index.html << 'EOF'
+            cat > /var/www/html/index.php << 'EOF'
             <!DOCTYPE html>
             <html lang="en">
             <head>
@@ -444,8 +470,14 @@ Resources:
             
                     <div class="info-box">
                         <h3>Instance Information:</h3>
-                        <p><strong>Instance ID:</strong> INSTANCE_ID_PLACEHOLDER</p>
-                        <p><strong>Private IP:</strong> LOCAL_IP_PLACEHOLDER</p>
+                        <p><strong>Instance ID:</strong> <?php 
+                            $instance_id = @file_get_contents('http://169.254.169.254/latest/meta-data/instance-id');
+                            echo $instance_id ? $instance_id : 'Unable to fetch';
+                        ?></p>
+                        <p><strong>Private IP:</strong> <?php 
+                            $private_ip = @file_get_contents('http://169.254.169.254/latest/meta-data/local-ipv4');
+                            echo $private_ip ? $private_ip : 'Unable to fetch';
+                        ?></p>
                         <p><strong>Region:</strong> eu-central-1 (Frankfurt)</p>
                         <p><strong>Timestamp:</strong> <span id="timestamp"></span></p>
                     </div>
@@ -514,10 +546,6 @@ Resources:
             </html>
             EOF
             
-            # Replace placeholders with actual values
-            sed -i "s/INSTANCE_ID_PLACEHOLDER/$INSTANCE_ID/g" /var/www/html/index.html
-            sed -i "s/LOCAL_IP_PLACEHOLDER/$LOCAL_IP/g" /var/www/html/index.html
-            
             # Create stress test endpoint
             echo "Creating stress test endpoint..."
             cat > /var/www/html/stress.php << 'EOF'
@@ -567,7 +595,7 @@ Resources:
               - Key: Name
                 Value: AutoScaling-WebServer
 
-  # IAM Role for EC2 instances
+  # IAM Role for EC2 instances with SSM access
   InstanceRole:
     Type: AWS::IAM::Role
     Properties:
@@ -584,7 +612,6 @@ Resources:
       Tags:
         - Key: Name
           Value: AutoScaling-InstanceRole
-
 
   InstanceProfile:
     Type: AWS::IAM::InstanceProfile
