@@ -244,7 +244,7 @@ Resources:
         - Key: Name
           Value: AutoScaling-ALB
 
-  # Target Group
+  # Target Group with improved health check settings
   TargetGroup:
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
     Properties:
@@ -253,12 +253,14 @@ Resources:
       Protocol: HTTP
       VpcId: !Ref VPC
       HealthCheckIntervalSeconds: 30
-      HealthCheckPath: /
+      HealthCheckPath: /health
       HealthCheckProtocol: HTTP
-      HealthCheckTimeoutSeconds: 5
+      HealthCheckTimeoutSeconds: 10
       HealthyThresholdCount: 2
-      UnhealthyThresholdCount: 5
+      UnhealthyThresholdCount: 3
       TargetType: instance
+      Matcher:
+        HttpCode: 200
       Tags:
         - Key: Name
           Value: AutoScaling-TargetGroup
@@ -274,7 +276,7 @@ Resources:
       Port: 80
       Protocol: HTTP
 
-  # Launch Template
+  # Launch Template with improved UserData
   LaunchTemplate:
     Type: AWS::EC2::LaunchTemplate
     Properties:
@@ -290,16 +292,41 @@ Resources:
         UserData:
           Fn::Base64: !Sub |
             #!/bin/bash
+            # Enable detailed logging
+            exec > >(tee /var/log/user-data.log|logger -t user-data -s 2>/dev/console) 2>&1
+            echo "Starting user data script at $(date)"
+            
+            # Update system
             yum update -y
-            yum install -y httpd stress
+            
+            # Install packages
+            echo "Installing packages..."
+            yum install -y httpd php stress
+            
+            # Start and enable httpd
+            echo "Starting Apache..."
             systemctl start httpd
             systemctl enable httpd
             
+            # Verify httpd is running
+            if ! systemctl is-active --quiet httpd; then
+                echo "ERROR: Apache failed to start"
+                exit 1
+            fi
+            
             # Get instance metadata
+            echo "Getting instance metadata..."
             INSTANCE_ID=$(curl -s http://169.254.169.254/latest/meta-data/instance-id)
             LOCAL_IP=$(curl -s http://169.254.169.254/latest/meta-data/local-ipv4)
             
-            # Create the web page with CPU stress test button
+            # Create health check endpoint
+            echo "Creating health check endpoint..."
+            cat > /var/www/html/health << 'EOF'
+            OK
+            EOF
+            
+            # Create the main web page
+            echo "Creating main web page..."
             cat > /var/www/html/index.html << 'EOF'
             <!DOCTYPE html>
             <html lang="en">
@@ -459,13 +486,14 @@ Resources:
             sed -i "s/LOCAL_IP_PLACEHOLDER/$LOCAL_IP/g" /var/www/html/index.html
             
             # Create stress test endpoint
+            echo "Creating stress test endpoint..."
             cat > /var/www/html/stress.php << 'EOF'
             <?php
             header('Content-Type: text/plain');
             
             if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 // Start CPU stress test in background (5 minutes)
-                $command = 'stress --cpu 4 --timeout 300s > /dev/null 2>&1 &';
+                $command = 'nohup stress --cpu 2 --timeout 300s > /dev/null 2>&1 &';
                 exec($command);
                 echo "CPU stress test started for 5 minutes";
             } else {
@@ -474,23 +502,56 @@ Resources:
             ?>
             EOF
             
-            # Install and configure PHP
-            yum install -y php
-            systemctl restart httpd
+            # Configure Apache for PHP and URL rewriting
+            echo "Configuring Apache..."
             
-            # Configure Apache to handle PHP and the stress endpoint
-            cat >> /etc/httpd/conf/httpd.conf << 'EOF'
+            # Enable mod_rewrite
+            echo "LoadModule rewrite_module modules/mod_rewrite.so" >> /etc/httpd/conf/httpd.conf
             
-            # Handle stress endpoint
-            <LocationMatch "^/stress$">
-                RewriteEngine On
-                RewriteRule ^stress$ /stress.php [L]
-            </LocationMatch>
-            
-            LoadModule rewrite_module modules/mod_rewrite.so
+            # Create .htaccess for URL rewriting
+            cat > /var/www/html/.htaccess << 'EOF'
+            RewriteEngine On
+            RewriteRule ^stress$ stress.php [L]
             EOF
             
+            # Update main Apache configuration
+            cat >> /etc/httpd/conf/httpd.conf << 'EOF'
+            
+            # Allow .htaccess overrides
+            <Directory "/var/www/html">
+                AllowOverride All
+                Require all granted
+            </Directory>
+            EOF
+            
+            # Set proper permissions
+            chown -R apache:apache /var/www/html
+            chmod -R 644 /var/www/html
+            chmod 755 /var/www/html
+            
+            # Restart Apache to apply all changes
+            echo "Restarting Apache..."
             systemctl restart httpd
+            
+            # Verify Apache is still running after restart
+            sleep 5
+            if ! systemctl is-active --quiet httpd; then
+                echo "ERROR: Apache failed after restart"
+                systemctl status httpd
+                exit 1
+            fi
+            
+            # Test health endpoint
+            echo "Testing health endpoint..."
+            if ! curl -f http://localhost/health > /dev/null 2>&1; then
+                echo "ERROR: Health check endpoint not responding"
+                exit 1
+            fi
+            
+            # Signal CloudFormation that the instance is ready
+            /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource AutoScalingGroup --region ${AWS::Region}
+            
+            echo "User data script completed successfully at $(date)"
 
         TagSpecifications:
           - ResourceType: instance
@@ -521,7 +582,7 @@ Resources:
       Roles:
         - !Ref InstanceRole
 
-  # Auto Scaling Group
+  # Auto Scaling Group with improved settings
   AutoScalingGroup:
     Type: AWS::AutoScaling::AutoScalingGroup
     Properties:
@@ -538,11 +599,22 @@ Resources:
       TargetGroupARNs:
         - !Ref TargetGroup
       HealthCheckType: ELB
-      HealthCheckGracePeriod: 300
+      HealthCheckGracePeriod: 600  # Increased to 10 minutes to allow for full startup
+      DefaultCooldown: 300
       Tags:
         - Key: Name
           Value: AutoScaling-Instance
           PropagateAtLaunch: true
+    CreationPolicy:
+      ResourceSignal:
+        Count: 1
+        Timeout: PT15M
+    UpdatePolicy:
+      AutoScalingRollingUpdate:
+        MinInstancesInService: 1
+        MaxBatchSize: 1
+        PauseTime: PT15M
+        WaitOnResourceSignals: true
 
   # Scaling Policies
   ScaleUpPolicy:
@@ -606,6 +678,12 @@ Outputs:
     Value: !Sub 'http://${ApplicationLoadBalancer.DNSName}'
     Export:
       Name: !Sub '${AWS::StackName}-LoadBalancerURL'
+
+  HealthCheckURL:
+    Description: Health check endpoint URL
+    Value: !Sub 'http://${ApplicationLoadBalancer.DNSName}/health'
+    Export:
+      Name: !Sub '${AWS::StackName}-HealthCheckURL'
 
   VPCId:
     Description: VPC ID

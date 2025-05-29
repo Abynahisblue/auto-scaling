@@ -5,8 +5,8 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="666028ab-039c-4e7e-b2e3-3ec1acfd3907" name="Changes" comment="">
-      <change afterPath="$PROJECT_DIR$/.idea/misc.xml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/autoScalingLab.yaml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/autoScalingLab.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/autoScalingLab.yaml" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -55,7 +55,8 @@
       <updated>1748437655077</updated>
       <workItem from="1748437657959" duration="234000" />
       <workItem from="1748437915361" duration="1823000" />
-      <workItem from="1748441713431" duration="1200000" />
+      <workItem from="1748441713431" duration="1953000" />
+      <workItem from="1748511890337" duration="731000" />
     </task>
     <servers />
   </component>
